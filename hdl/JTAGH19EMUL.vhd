@@ -5,6 +5,9 @@ use     ieee.numeric_std.all;
 use     work.JtagTapPkg.all;
 
 entity JTAGH19EMUL is
+   generic (
+      HUB_ID_G       : std_logic_vector(23 downto 0) := x"000043"
+   );
    port (
       clk            : in  std_logic;
       rst            : in  std_logic;
@@ -31,6 +34,7 @@ end entity JTAGH19EMUL;
 
 architecture rtl of JTAGH19EMUL is
 
+   constant BYP_IDX_C       : integer := -1;
    constant ER1_IDX_C       : natural := 0;
    constant ER2_IDX_C       : natural := 1;
 
@@ -40,12 +44,16 @@ architecture rtl of JTAGH19EMUL is
    );
 
    type RegType is record
+      rstn             : std_logic;
+      er2_tdo          : std_logic;
       er1_dr           : std_logic_vector(23 downto 0);
       er1_sr           : std_logic_vector(23 downto 0);
    end record RegType;
 
    constant REG_INIT_C : RegType := (
-      er1_dr           => (others => '0'),
+      rstn             => '0',
+      er2_tdo          => '0',
+      er1_dr           => x"000006",
       er1_sr           => (others => '0')
    );
 
@@ -58,39 +66,61 @@ architecture rtl of JTAGH19EMUL is
    signal updateD      : std_logic;
    signal tckRising    : std_logic;
    signal tckFalling   : std_logic;
+   signal tapState     : JtagTapStateType;
 
 begin
 
-   P_COMB : process ( r, tckRising, tckFalling, TDI, instIdx, captureD, shiftD, updateD, ER2_TDO ) is
+   P_COMB : process ( r, tckRising, tckFalling, TDI, instIdx, captureD, shiftD, updateD, ER2_TDO, tapState ) is
       variable v : RegType;
    begin
       v                := r;
-      JCE2             <= '0';
-      if ( instIdx = ER1_IDX_C ) then
-         if ( (tckRising and captureD) = '1' ) then
+      -- JRSTN
+      if ( tckFalling = '1' ) then
+         if ( tapState = TEST_LOGIC_RESET ) then
+            v.rstn := '0';
+         else
+            v.rstn := '1';
+         end if;
+      end if;
+      if ( (tckRising and captureD) = '1' ) then
+         if ( instIdx = ER1_IDX_C ) then
             v.er1_sr := r.er1_dr;
-         end if;
-         if ( (tckRising and shiftD) = '1' ) then
-            v.er1_sr := TDI & r.er1_dr(r.er1_dr'left downto 1);
-         end if;
-         if ( (tckRising and updateD) = '1' ) then
-            v.er1_dr := r.er1_sr;
+	 else
+            -- for all other instructions capture the hub id
+	    v.er1_sr := HUB_ID_G;
+	 end if;
+      end if;
+
+      if ( (tckRising and shiftD) = '1' ) then
+         v.er1_sr := TDI & r.er1_sr(r.er1_sr'left downto 1);
+	 if ( instIdx = ER2_IDX_C ) then
+            -- if msbit is set rotate DR with the HUB ID; otherwise
+            -- zero-fill (not sure if necessary)
+            v.er1_sr(v.er1_sr'left) := r.er1_sr(0) and r.er1_dr(23);
+            -- if any IP_ENABLE bit is set override and register lsbit
+	    L_SEL_ER2 : for i in 0 to 18 loop
+               if ( r.er1_dr(i+4) = '1' ) then
+                  v.er1_sr(0) := ER2_TDO(i);
+                  exit L_SEL_ER2;
+	       end if;
+	    end loop;
+	 end if;
+      end if;
+
+      if ( tckFalling = '1' ) then
+         v.er2_tdo := r.er1_sr(0);
+      end if;
+
+      if ( (tckFalling and updateD) = '1' ) then
+         if ( instIdx = ER1_IDX_C ) then
+            v.er1_dr             := r.er1_sr;
+            v.er1_dr(2 downto 0) := "110";
          end if;
       end if;
-      if ( instIdx = ER2_IDX_C ) then
-         JCE2 <= '1';
-      end if;
+
       
-      IP_ENABLE         <= (others => '0');
-      tdoSel(ER2_IDX_C) <= '0';
-      L_ER2 : for  i in 0 to 18 loop
-         if ( '1' = r.er1_dr(4 + i) ) then
-            IP_ENABLE(i) <= '1';
-            tdoSel(ER2_IDX_C) <= ER2_TDO(i);
-            exit L_ER2;
-         end if;
-      end loop;
       tdoSel(ER1_IDX_C) <= r.er1_sr(0);
+      tdoSel(ER2_IDX_C) <= r.er2_tdo;
       rin               <= v;
    end process P_COMB;
 
@@ -121,7 +151,7 @@ begin
          tckRising        => tckRising,
          tckFalling       => tckFalling,
 
-         state            => open,
+         state            => tapState,
          instructionIdx   => instIdx,
          instructionCapt  => open,
          instructionSel   => open,
@@ -131,10 +161,12 @@ begin
          updateD          => updateD
       );
 
-   JTCK    <= TCK;
-   JTDI    <= TDI;
-   JSHIFT  <= shiftD;
-   JUPDATE <= updateD;
-   JRSTN   <= '1';
+   JTCK       <= TCK;
+   JTDI       <= TDI;
+   JSHIFT     <= shiftD               when ( instIdx > BYP_IDX_C ) else '0';
+   JUPDATE    <= updateD              when ( instIdx > BYP_IDX_C ) else '0';
+   JCE2       <= (captureD or shiftD) when ( instIdx = ER2_IDX_C ) else '0';
+   JRSTN      <= r.rstn;
+   IP_ENABLE  <= r.er1_dr(22 downto 4);
 
 end architecture rtl;
