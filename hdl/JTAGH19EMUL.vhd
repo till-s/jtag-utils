@@ -72,11 +72,17 @@ architecture rtl of JTAGH19EMUL is
 
 begin
 
+   -- all comments refer to observed JTAGH19SOFT behavior
+
    P_COMB : process ( r, tckRising, tckFalling, TDI, instIdx, captureD, shiftD, updateD, ER2_TDO, tapState ) is
       variable v : RegType;
    begin
       v                := r;
-      -- JRSTN
+      -- JRSTN changes state on tck negedge: low after entering TEST_LOGIC_RESET, high on first negedge
+      -- after leaving TEST_LOGIC_RESET.
+      -- TEST_LOGIC_RESET:
+      --   - does not change current instruction (initial IR register is 0x00)
+      --   - does not change bypass register
       if ( tckFalling = '1' ) then
          if ( tapState = TEST_LOGIC_RESET ) then
             v.rstn := '0';
@@ -84,43 +90,59 @@ begin
             v.rstn := '1';
          end if;
       end if;
+
+      -- implement ER1 and ER2 instructions
+      -- ER1 has a 24-bit data register which holds the state of a mux
+      -- which switches data registers (ip_enable/er2_tdo) of up to 18
+      -- hubs. The mux is 'one-hot' encoded and selects one of er1_dr[22:4]
+      -- 'hubs'. The MSbit (er1_dr[23]) selects the H19's internal 24-bit ID
+      -- register; i.e., when this bit is selected the ER2 instruction yields
+      -- the (24-bit) HUB_ID.
       if ( (tckRising and captureD) = '1' ) then
          if ( instIdx = ER1_IDX_C ) then
+            -- read back ER1 data register
             v.er1_sr := r.er1_dr;
 	 else
-            -- for all other instructions capture the hub id
-	    v.er1_sr := HUB_ID_G;
+            if ( r.er1_dr(23) = '1' ) then
+               -- for all other instructions capture the hub id or all/zeroes
+               v.er1_sr := HUB_ID_G;
+	    else
+               v.er1_sr := (others => '0');
+	    end if;
 	 end if;
       end if;
 
+      -- shift
       if ( (tckRising and shiftD) = '1' ) then
          v.er1_sr := TDI & r.er1_sr(r.er1_sr'left downto 1);
 	 if ( instIdx = ER2_IDX_C ) then
-            -- rotate DR with the HUB ID; if msbit int ER1-DR
-            -- is not set then the ID will not be propagated into
-            -- er2_tdo, see below
+            -- rotate DR with the HUB ID/zeros;
             v.er1_sr(v.er1_sr'left) := r.er1_sr(0);
 	 end if;
       end if;
 
+      -- er2_tdo is apparently latched on tck negedge
+      -- and forwarded by the TAP to TDO (when the ER2
+      -- instruction is active).
       if ( tckFalling = '1' ) then
-         if ( r.er1_dr(23) = '0' ) then
-            -- ID not selected
-            v.er2_tdo := '0';
-            -- if any IP_ENABLE bit is set override and register lsbit
-	    L_SEL_ER2 : for i in 0 to 18 loop
-               if ( r.er1_dr(i+4) = '1' ) then
-                  v.er2_tdo := ER2_TDO(i);
-                  exit L_SEL_ER2;
-	       end if;
-	    end loop;
-         end if;
+         v.er2_tdo := r.er1_sr(0); -- ID if selected, otherwise zeroes
+         -- if any IP_ENABLE bit is set override and register lsbit
+         L_SEL_ER2 : for i in 0 to 18 loop
+            if ( r.er1_dr(i+4) = '1' ) then
+               v.er2_tdo := ER2_TDO(i);
+               exit L_SEL_ER2;
+            end if;
+         end loop;
       end if;
 
+      -- JTDI posedge-registered version of TDI
       if ( tckRising = '1' ) then
          v.jtdi := TDI;
       end if;
 
+      -- update ER1 data register from shift register
+      -- IP_ENABLE (which maps to er1_dr) changes state
+      -- on TCK negedge.
       if ( (tckFalling and updateD) = '1' ) then
          if ( instIdx = ER1_IDX_C ) then
             v.er1_dr             := r.er1_sr;
@@ -171,10 +193,13 @@ begin
          updateD          => updateD
       );
 
-   JTCK       <= TCK;
+   JTCK       <= TCK;    -- mirror of JTCK
    JTDI       <= r.jtdi;
+   -- JSHIFT asserted in shift state when ER1 or ER2 are active
    JSHIFT     <= shiftD               when ( instIdx > BYP_IDX_C ) else '0';
+   -- JUPDATE asserted in update state when ER1 or ER2 are active
    JUPDATE    <= updateD              when ( instIdx > BYP_IDX_C ) else '0';
+   -- JCE2 asserted when ER2 active and state is SHIFT or UPDATE (but not capture)
    JCE2       <= (captureD or shiftD) when ( instIdx = ER2_IDX_C ) else '0';
    JRSTN      <= r.rstn;
    IP_ENABLE  <= r.er1_dr(22 downto 4);
