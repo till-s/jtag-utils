@@ -56,8 +56,6 @@ architecture rtl of JtagTap is
       dly              : std_logic;
       tdo              : std_logic;
       sr               : InstructionType;
-      tckRising        : std_logic;
-      tckFalling       : std_logic;
       instructionIdx   : integer range -1 to numInstructions(CFG_G) - 1;
    end record RegType;
 
@@ -67,8 +65,6 @@ architecture rtl of JtagTap is
       dly              => '0',
       tdo              => '0',
       sr               => (others => '0'),
-      tckRising        => '0',
-      tckFalling       => '0',
       instructionIdx   => DEFAULT_INSTRUCTION
    );
 
@@ -82,12 +78,8 @@ begin
       v                := r;
       v.ltck           := tck;
       v.dly            := '1'; -- wait for ltck being valid
-      v.tckRising      := '0';
-      v.tckFalling     := '0';
       if ( r.dly = '1' ) then
          if ( r.ltck /= tck ) then
-            v.tckRising  := tck;
-            v.tckFalling := not tck;
             if ( tck = '1' ) then -- rising edge
                case ( r.state ) is
                   when TEST_LOGIC_RESET =>
@@ -194,9 +186,6 @@ begin
 
                   when SHIFT_DR =>
                      v.tdo := r.sr(0); -- bypass
-                     if ( r.instructionIdx >= 0 ) then
-                        v.tdo := tdoSel(r.instructionIdx);
-                     end if;
                      
                   when SHIFT_IR =>
                      v.tdo := r.sr(0);
@@ -229,6 +218,12 @@ begin
          instructionSel( r.instructionIdx ) <= '1';
       end if;
       rin              <= v;
+      tckRising        <= tck and not r.ltck;
+      tckFalling       <= r.ltck and not tck;
+      tdo              <= r.tdo;
+      if ( r.instructionIdx >= 0 ) then
+         tdo <= tdoSel(r.instructionIdx);
+      end if;
    end process P_COMB;
 
    P_SEQ : process ( clk ) is
@@ -241,9 +236,6 @@ begin
          end if;
       end if;
    end process P_SEQ;
-
-   tckRising      <= r.tckRising;
-   tckFalling     <= r.tckFalling;
 
    state          <= r.state;
    instructionIdx <= r.instructionIdx;
