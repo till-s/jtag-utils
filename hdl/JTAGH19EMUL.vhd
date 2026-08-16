@@ -96,21 +96,25 @@ begin
       if ( (tckRising and shiftD) = '1' ) then
          v.er1_sr := TDI & r.er1_sr(r.er1_sr'left downto 1);
 	 if ( instIdx = ER2_IDX_C ) then
-            -- if msbit is set rotate DR with the HUB ID; otherwise
-            -- zero-fill (not sure if necessary)
-            v.er1_sr(v.er1_sr'left) := r.er1_sr(0) and r.er1_dr(23);
-            -- if any IP_ENABLE bit is set override and register lsbit
-	    L_SEL_ER2 : for i in 0 to 18 loop
-               if ( r.er1_dr(i+4) = '1' ) then
-                  v.er1_sr(0) := ER2_TDO(i);
-                  exit L_SEL_ER2;
-	       end if;
-	    end loop;
+            -- rotate DR with the HUB ID; if msbit int ER1-DR
+            -- is not set then the ID will not be propagated into
+            -- er2_tdo, see below
+            v.er1_sr(v.er1_sr'left) := r.er1_sr(0);
 	 end if;
       end if;
 
       if ( tckFalling = '1' ) then
-         v.er2_tdo := r.er1_sr(0);
+         if ( r.er1_dr(23) = '0' ) then
+            -- ID not selected
+            v.er2_tdo := '0';
+            -- if any IP_ENABLE bit is set override and register lsbit
+	    L_SEL_ER2 : for i in 0 to 18 loop
+               if ( r.er1_dr(i+4) = '1' ) then
+                  v.er2_tdo := ER2_TDO(i);
+                  exit L_SEL_ER2;
+	       end if;
+	    end loop;
+         end if;
       end if;
 
       if ( tckRising = '1' ) then
