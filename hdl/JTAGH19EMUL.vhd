@@ -46,6 +46,7 @@ architecture rtl of JTAGH19EMUL is
    type RegType is record
       rstn             : std_logic;
       er2_tdo          : std_logic;
+      jtdi             : std_logic;
       er1_dr           : std_logic_vector(23 downto 0);
       er1_sr           : std_logic_vector(23 downto 0);
    end record RegType;
@@ -53,6 +54,7 @@ architecture rtl of JTAGH19EMUL is
    constant REG_INIT_C : RegType := (
       rstn             => '0',
       er2_tdo          => '0',
+      jtdi             => '0',
       er1_dr           => x"000006",
       er1_sr           => (others => '0')
    );
@@ -111,6 +113,10 @@ begin
          v.er2_tdo := r.er1_sr(0);
       end if;
 
+      if ( tckRising = '1' ) then
+         v.jtdi := TDI;
+      end if;
+
       if ( (tckFalling and updateD) = '1' ) then
          if ( instIdx = ER1_IDX_C ) then
             v.er1_dr             := r.er1_sr;
@@ -162,7 +168,7 @@ begin
       );
 
    JTCK       <= TCK;
-   JTDI       <= TDI;
+   JTDI       <= r.jtdi;
    JSHIFT     <= shiftD               when ( instIdx > BYP_IDX_C ) else '0';
    JUPDATE    <= updateD              when ( instIdx > BYP_IDX_C ) else '0';
    JCE2       <= (captureD or shiftD) when ( instIdx = ER2_IDX_C ) else '0';
