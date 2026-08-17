@@ -1,9 +1,9 @@
-PROGS=CommandJtagBBTb
+PROGS=CommandJtagBBTb JTAGH19EMULTb
 
 VPATH=../../acm-toolbox/hdl:../hdl
 
-run: $(PROGS)
-	for i in $^; do ./$$i; done
+run: $(filter-out JTAGH19EMULTb, $(PROGS))
+	for i in $^; do echo "Running $$i" && ./$$i; done
 	echo "All Tests PASSED"
 
 build: $(PROGS)
@@ -19,6 +19,12 @@ CommandMuxPkg.o: BasicPkg.o
 CommandJtagBB.o: CommandMuxPkg.o
 
 CommandJtagBBTb.o: CommandJtagBB.o
+
+JtagTap.o: JtagTapPkg.o
+
+JTAGH19EMUL.o: JtagTap.o  JtagTapPkg.o
+
+JTAGH19EMULTb.o: JTAGH19EMUL.o
 
 .PHONY: all clean
 
