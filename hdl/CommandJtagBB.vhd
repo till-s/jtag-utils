@@ -32,6 +32,36 @@ use ieee.math_real.all;
 use work.BasicPkg.all;
 use work.CommandMuxPkg.all;
 
+-- inbound stream: (SUBCMD_TDI_C, SUBCMD_TMS_C, SUBCMD_TDI_WO_C)
+--
+--   cmd, len, data, data, data, ...
+--
+--   len[3:0]: # bits to shift (zero-based!) of *last* 'data' byte.
+--   len[7]    TDI level to be shifted (SUBCMD_TMS_C)
+--
+-- outbound stream (TDI_C, TMS_C, TDI_RO_C):
+--   cmd, data, data, data, ...
+--   'len+1' most-significant bits of last data byte are valid
+--
+-- inbound stream: (TDI_RO_C)
+--   cmd, lenlo, lenhi
+--
+-- lenhi:lenlo: byte count (zero-based) to read back (TDI driven to '0')
+--
+-- outbound stream (TDI_WO_C)
+--  cmd, dummy  (dummy returned when all data have been written)
+--
+-- inbound stream (SUBCMD_BB_C)
+--  cmd, val
+--
+--  val(0) driven on TCK
+--  val(1) driven on TDI
+--  val(3) driven on TMS
+--
+-- outbound stream (SUBCMD_BB_C)
+--  cmd, readback (val[0]: TCK, val[1]: TDI, val[2]: TDO, val[3]: TMS)
+
+
 entity CommandJtagBB is
    generic (
       -- zero-based half-period TCK
@@ -56,22 +86,24 @@ end entity CommandJtagBB;
 
 architecture rtl of CommandJtagBB is
 
-   type StateType is (ECHO, BB, LEN, READ, WRITE, DON, WAI);
+   type StateType is (ECHO, BB, LEN, LEN1, READ, WRITE, DON, WAI);
 
    subtype CountType is integer range  -1 to HPER_DELAY_G - 1;
 
    subtype SubCommandType is std_logic_vector(7-NUM_CMD_BITS_C downto 0);
 
-   constant SUBCMD_TDI_C : SubCommandType := SubCommandType( to_unsigned( 0, SubCommandType'length ) );
-   constant SUBCMD_TMS_C : SubCommandType := SubCommandType( to_unsigned( 1, SubCommandType'length ) );
-   constant SUBCMD_BB_C  : SubCommandType := SubCommandType( to_unsigned( 2, SubCommandType'length ) );
+   constant SUBCMD_TDI_C    : SubCommandType := SubCommandType( to_unsigned( 0, SubCommandType'length ) );
+   constant SUBCMD_TMS_C    : SubCommandType := SubCommandType( to_unsigned( 1, SubCommandType'length ) );
+   constant SUBCMD_BB_C     : SubCommandType := SubCommandType( to_unsigned( 2, SubCommandType'length ) );
+   constant SUBCMD_TDI_WO_C : SubCommandType := SubCommandType( to_unsigned( 3, SubCommandType'length ) );
+   constant SUBCMD_TDI_RO_C : SubCommandType := SubCommandType( to_unsigned( 4, SubCommandType'length ) );
 
    type RegType is record
       state         : StateType;
       nextState     : StateType;
       cmd           : SubCommandType;
       presc         : CountType;
-      len           : signed(3 downto 0);
+      len           : signed(16 downto 0);
       lstSeen       : std_logic;
       tck           : std_logic;
       tms           : std_logic;
@@ -133,10 +165,11 @@ begin
 
       case ( r.state ) is
          when ECHO =>
-            mOb    <= mIb;
-            rIbLoc <= rOb;
+            mOb       <= mIb;
+            rIbLoc    <= rOb;
             v.tdoSR   := x"FF"; -- error status
             v.lstSeen := '0';
+            v.presc   := HPER_DELAY_G - 1;
             if ( (rOb and mIb.vld) = '1' ) then
                v.cmd := mIb.dat(7 downto NUM_CMD_BITS_C);
                if ( v.cmd = SUBCMD_BB_C ) then
@@ -151,7 +184,10 @@ begin
 
 	 when BB  =>
 	    mOb        <= mIb;
-	    mOb.dat(1) <= tdo;
+	    mOb.dat(0) <= r.tck;
+	    mOb.dat(1) <= r.sr(0);
+	    mOb.dat(2) <= tdo;
+	    mOb.dat(3) <= r.tms;
             if ( mIb.vld = '1' ) then
                v.tck   := mIb.dat(0);
                v.tdi   := mIb.dat(1);
@@ -166,12 +202,37 @@ begin
 
          when LEN =>
             if ( mIb.vld = '1' ) then
-               v.len   := signed(resize(unsigned(mIb.dat(2 downto 0)), 4));
+               -- full length is only relevant for TDI_RO
+               -- in TMS mode the msbit is set but does not
+               -- propagate into bitCnt!
+               v.len(7 downto 0) := signed(mIb.dat);
+               -- sign of 'len' determines when we are done
+               -- in read-only mode; keep asserted in all
+               -- other modes (overwritten in LEN1)
+               v.len(v.len'left) := '1';
+               -- [r.tdi] is irrelevant in non-TMS mode
                v.tdi   := mIb.dat(7);
-               if ( mIb.lst /= '1' ) then
-                  v.state   := READ;
+               if ( r.cmd = SUBCMD_TDI_RO_C ) then
+                  v.state := LEN1;
                else
-                  v.state   := DON;
+                  v.state := READ;
+               end if;
+               if ( mIb.lst = '1' ) then
+                  v.state := DON;
+               end if;
+            end if;
+
+         when LEN1 =>
+            v.sr      := (others => '0');
+            if ( mIb.vld = '1' ) then
+               v.len(15 downto 8) := signed(mIb.dat);
+               v.len(v.len'left)  := '0';
+               v.len              := v.len - 1;
+               v.bitCnt           := to_signed(7, v.bitCnt'length);
+               v.state            := WAI;
+               if ( mIb.lst = '0' ) then
+                  -- illegal; no more input!
+                  v.state := DON;
                end if;
             end if;
 
@@ -179,11 +240,10 @@ begin
             if ( mIb.vld = '1' ) then
                v.sr := mIb.dat;
                if ( mIb.lst = '1' ) then
-                  v.bitCnt := r.len;
+                  v.bitCnt := r.len(v.bitCnt'range);
                else
                   v.bitCnt := to_signed(7, v.bitCnt'length);
                end if;
-               v.presc     := HPER_DELAY_G - 1;
                v.state     := WAI;
             end if;
 
@@ -200,6 +260,9 @@ begin
             rIbLoc  <= '0';
             if ( rOb = '1' ) then
                v.state := READ;
+               if ( r.cmd = SUBCMD_TDI_RO_C ) then
+                  v.state := WAI;
+               end if;
             end if;
 
          when WAI =>
@@ -208,12 +271,14 @@ begin
                v.tck    := not r.tck;
                v.presc  := HPER_DELAY_G - 1;
                if ( r.tck = '0' ) then
+                  -- rising edge
                   v.tdoSR  := tdo & r.tdoSR(7 downto 1);
                   v.bitCnt := r.bitCnt - 1;
                else
                   v.sr     := '0' & r.sr(7 downto 1);
                   if ( r.bitCnt < 0 ) then
-                    if ( r.lstSeen = '1' ) then
+                    v.bitCnt := to_signed(7, v.bitCnt'length);
+                    if ( (r.lstSeen = '1') and (r.len < 0) ) then
                        v.state := DON;
                        if ( isTMS ) then
                           v.tms := r.sr(0);
@@ -222,6 +287,12 @@ begin
                        end if;
                     else
                        v.state := WRITE;
+                       if ( r.cmd = SUBCMD_TDI_WO_C ) then
+                          v.state := READ;
+                       end if;
+                       if ( r.cmd = SUBCMD_TDI_RO_C ) then
+                          v.len  := r.len - 1;
+                       end if;
                     end if;
                   end if;
                end if;
