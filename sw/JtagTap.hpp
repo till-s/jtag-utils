@@ -20,7 +20,6 @@ class JtagTap {
     std::vector<uint8_t> dri_;
     std::vector<uint8_t> dro_;
     uint8_t              drRemBits_ {8};
-    uint8_t              irBits_ {0};
 
     static constexpr const uint64_t BYPASS = static_cast<uint64_t>(-1LL);
 
